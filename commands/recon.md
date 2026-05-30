@@ -44,6 +44,27 @@ So if the program says "max 2 req/s", recon runs at 2. If the program says nothi
 > Passive tools (`subfinder`, `assetfinder`, `waybackurls`, `gau`, Chaos API) hit
 > third-party data sources, **not the target**, so the cap does not apply to them.
 
+## Egress policy (NON-NEGOTIABLE)
+
+All recon/scan/probe traffic exits the **10888 burner node**, never the **10808
+clean node**. The host's global proxy env points everything at 10808 (clean) — which
+is correct for claude and normal WSL2 apps, but must NOT carry engagement scanning.
+Each recon step therefore re-exports the proxy env to the burner **for that shell
+only**, and the HTTP scanners also take an explicit `-proxy` flag:
+
+```
+BURNER="${BURNER_PROXY:-socks5://127.0.0.1:10888}"   # override with BURNER_PROXY if your port differs
+export HTTP_PROXY=$BURNER HTTPS_PROXY=$BURNER ALL_PROXY=$BURNER (and lowercase)
+httpx/katana/nuclei ... -proxy "$BURNER"
+```
+
+> Why both env AND `-proxy`: setting `ALL_PROXY` alone is **not enough** — a pre-set
+> `HTTPS_PROXY=…10808` wins over `ALL_PROXY` for https URLs, so all the `*_PROXY` vars
+> must be overwritten together. The explicit `-proxy` flag is the reliable backstop
+> (verified: `httpx -proxy socks5://127.0.0.1:10888` exits via the burner regardless).
+> Verify any time with `curl -s https://api.ipify.org` through the same proxy — it must
+> show the burner IP, not the clean-node IP.
+
 ## Steps
 
 ### Step 0: Resolve the rate cap from scope.md
@@ -85,6 +106,12 @@ echo "[+] Rate cap: ${RL} req/s  (hard ceiling ${HARD_MAX}; scope.md declared: $
 TARGET="$1"
 mkdir -p recon/$TARGET
 
+# Scan/probe egress → 10888 BURNER node (never the 10808 clean node). Overrides the
+# global proxy env for THIS recon shell only; claude & normal WSL2 apps keep 10808.
+BURNER="${BURNER_PROXY:-socks5://127.0.0.1:10888}"
+export HTTP_PROXY="$BURNER" HTTPS_PROXY="$BURNER" ALL_PROXY="$BURNER" \
+       http_proxy="$BURNER" https_proxy="$BURNER" all_proxy="$BURNER"
+
 # Chaos API (ProjectDiscovery — most comprehensive)
 curl -s "https://dns.projectdiscovery.io/dns/$TARGET/subdomains" \
   -H "Authorization: $CHAOS_API_KEY" \
@@ -102,10 +129,14 @@ echo "[+] Subdomains: $(wc -l < recon/$TARGET/subdomains.txt)"
 ```bash
 # DNS resolve + HTTP probe with tech detection
 : "${RL:=5}"; : "${CONC:=5}"     # fallback to hard cap if Step 0 ran in a separate shell
-# -rl caps target-facing probe rate; -t held to the same value so threads can't outrun the cap.
+BURNER="${BURNER_PROXY:-socks5://127.0.0.1:10888}"
+export HTTP_PROXY="$BURNER" HTTPS_PROXY="$BURNER" ALL_PROXY="$BURNER" \
+       http_proxy="$BURNER" https_proxy="$BURNER" all_proxy="$BURNER"
+# -rl caps probe rate; -t holds threads to it; -proxy forces the probe out the 10888
+# burner (explicit flag — most reliable; env alone loses to a pre-set HTTPS_PROXY).
 cat recon/$TARGET/subdomains.txt \
   | dnsx -silent \
-  | httpx -silent -status-code -title -tech-detect -rl "$RL" -t "$CONC" \
+  | httpx -silent -status-code -title -tech-detect -rl "$RL" -t "$CONC" -proxy "$BURNER" \
   | tee recon/$TARGET/live-hosts.txt
 
 echo "[+] Live hosts: $(wc -l < recon/$TARGET/live-hosts.txt)"
@@ -116,8 +147,11 @@ echo "[+] Live hosts: $(wc -l < recon/$TARGET/live-hosts.txt)"
 ```bash
 # Active crawl — -rl/-c hold katana to the scope cap (it hits the live target)
 : "${RL:=5}"; : "${CONC:=5}"     # fallback to hard cap if Step 0 ran in a separate shell
+BURNER="${BURNER_PROXY:-socks5://127.0.0.1:10888}"
+export HTTP_PROXY="$BURNER" HTTPS_PROXY="$BURNER" ALL_PROXY="$BURNER" \
+       http_proxy="$BURNER" https_proxy="$BURNER" all_proxy="$BURNER"
 cat recon/$TARGET/live-hosts.txt | awk '{print $1}' \
-  | katana -d 3 -jc -kf all -silent -rl "$RL" -c "$CONC" \
+  | katana -d 3 -jc -kf all -silent -rl "$RL" -c "$CONC" -proxy "$BURNER" \
   | anew recon/$TARGET/urls.txt
 
 # Historical URLs
@@ -151,12 +185,15 @@ echo "[+] API endpoints:   $(wc -l < recon/$TARGET/api-endpoints.txt)"
 
 ```bash
 : "${RL:=5}"; : "${CONC:=5}"     # fallback to hard cap if Step 0 ran in a separate shell
-# -rl = global requests/sec cap, -c = template concurrency. Both pinned to the
-# scope-derived cap so nuclei cannot exceed 5 req/s (its default is 150).
+BURNER="${BURNER_PROXY:-socks5://127.0.0.1:10888}"
+export HTTP_PROXY="$BURNER" HTTPS_PROXY="$BURNER" ALL_PROXY="$BURNER" \
+       http_proxy="$BURNER" https_proxy="$BURNER" all_proxy="$BURNER"
+# -rl = global requests/sec cap, -c = template concurrency (both pinned to the
+# scope-derived cap, ≤5 req/s). -proxy forces nuclei out the 10888 burner node.
 nuclei -l recon/$TARGET/live-hosts.txt \
   -t ~/nuclei-templates/ \
   -severity critical,high,medium \
-  -rl "$RL" -c "$CONC" \
+  -rl "$RL" -c "$CONC" -proxy "$BURNER" \
   -o recon/$TARGET/nuclei.txt
 
 echo "[+] Nuclei findings: $(wc -l < recon/$TARGET/nuclei.txt)  (rate-capped at ${RL} req/s)"

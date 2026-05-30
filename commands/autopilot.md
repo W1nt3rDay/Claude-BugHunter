@@ -88,6 +88,23 @@ entirely** — a rate cap does not make a banned scanner allowed.
 
 > Re-read `scope.md` whenever it changes mid-run; the cap is not cached across phases.
 
+## Egress policy (NON-NEGOTIABLE)
+
+**Every request that touches the target — in BOTH phases — exits the `10888` burner
+node, never the `10808` clean node.** The host's global proxy env routes normal apps
+(claude, browsing) through 10808; engagement scanning must never share that IP.
+
+| Source of target traffic | How it reaches the burner |
+|---|---|
+| RECON (`/recon`) | Already enforced — `/recon` re-exports `*_PROXY` to the burner and passes `-proxy "$BURNER"` to httpx/katana/nuclei. |
+| HUNT — active testing (`curl`, scripted probes you run via Bash) | Prefix every target request: `curl --proxy socks5://127.0.0.1:10888 …` (or `export HTTP_PROXY=… HTTPS_PROXY=… ALL_PROXY=…` to the burner for that shell — set ALL the `*_PROXY` vars, since a stale `HTTPS_PROXY` outranks `ALL_PROXY`). |
+| Browser (Playwright MCP) | Already correct — its launcher pins `--proxy-server=socks5://127.0.0.1:10888`. |
+
+Before the first target request of a run, **verify** the egress:
+`curl --proxy socks5://127.0.0.1:10888 -s https://api.ipify.org` must return the
+burner IP (not the clean-node IP). If it returns the clean IP, stop and fix routing
+before sending anything to the target.
+
 ## Checkpoint Modes
 
 | Mode | When it stops | Best for |
