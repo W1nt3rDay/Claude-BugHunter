@@ -74,44 +74,62 @@ def _redact_pii(text: str) -> str:
     return re.sub(r"\b[\w.+-]+@[\w-]+\.[\w.-]+\b", "[email-redacted]", text)
 
 
-def build_html(title: str, request: str, response: str, captured: str, note: str | None) -> str:
+def _caption(title: str, note: str | None) -> str:
+    """A minimal, plain context line — only rendered when the operator passes one.
+    Kept deliberately unstyled so the image reads like a real captured artifact, not
+    a designed card. Most captions belong in the report text, not baked into the PNG."""
+    bits = []
+    if title:
+        bits.append(f'<div class="cap-t">{html.escape(title)}</div>')
+    if note:
+        bits.append(f'<div class="cap-n">{html.escape(note)}</div>')
+    return f'<div class="cap">{"".join(bits)}</div>' if bits else ""
+
+
+def build_html(title: str, request: str, response: str, captured: str,
+               note: str | None, style: str = "burp") -> str:
     req_e = html.escape(request.rstrip())
     res_e = html.escape(response.rstrip())
-    title_e = html.escape(title)
-    note_block = f'<div class="note">{html.escape(note)}</div>' if note else ""
+    cap = _caption(title, note)
+
+    if style == "terminal":
+        # Looks like `curl -i` output in a plain terminal — request, then response.
+        return f"""<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><style>
+  body {{ margin:0; background:#1c1c1c; color:#d0d0d0;
+         font-family: "Cascadia Mono","DejaVu Sans Mono",Menlo,Consolas,monospace;
+         font-size:13px; line-height:1.5; }}
+  .term {{ padding:14px 16px; white-space:pre-wrap; word-break:break-word; }}
+  .cap {{ padding:10px 16px 0; color:#8a8a8a; font-size:12px; }}
+  .cap-t {{ color:#cfcfcf; }} .cap-n {{ color:#8a8a8a; }}
+  .c {{ color:#8a8a8a; }}            /* comments / separators */
+</style></head><body>
+{cap}<div class="term"><span class="c"># request</span>
+{req_e}
+
+<span class="c"># response</span>
+{res_e}</div></body></html>"""
+
+    # Default "burp": neutral light HTTP viewer — plain Request | Response split,
+    # no accent colors, no branding, no footer. Boring on purpose.
     return f"""<!doctype html>
-<html lang="en"><head><meta charset="utf-8">
-<style>
-  * {{ box-sizing: border-box; }}
-  body {{ margin:0; background:#0f1115; color:#e6e6e6;
-         font-family: ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace; }}
-  .wrap {{ max-width: 1100px; margin: 0 auto; padding: 24px; }}
-  .hdr {{ display:flex; align-items:baseline; justify-content:space-between;
-          border-bottom:2px solid #da7756; padding-bottom:10px; margin-bottom:16px; }}
-  .hdr h1 {{ font-size:18px; margin:0; color:#fff; font-family: system-ui, sans-serif; }}
-  .hdr .ts {{ font-size:12px; color:#8a8f98; }}
-  .note {{ background:#1b1f27; border-left:3px solid #ff8b14; padding:8px 12px;
-           margin-bottom:16px; font-family: system-ui, sans-serif; font-size:13px; color:#ffd9b0; }}
-  .grid {{ display:grid; grid-template-columns: 1fr 1fr; gap:16px; }}
-  .panel {{ background:#171a21; border:1px solid #2a2f3a; border-radius:8px; overflow:hidden; }}
-  .panel .label {{ background:#222732; color:#9fb3c8; font-size:12px; letter-spacing:.08em;
-                   text-transform:uppercase; padding:7px 12px; border-bottom:1px solid #2a2f3a;
-                   font-family: system-ui, sans-serif; }}
-  .panel pre {{ margin:0; padding:12px; font-size:12.5px; line-height:1.5; white-space:pre-wrap;
-                word-break:break-word; color:#d7dce5; }}
-  .panel.req .label {{ color:#ffb591; }}
-  .panel.res .label {{ color:#a6e3a1; }}
-  .foot {{ margin-top:14px; font-size:11px; color:#6b7280; font-family: system-ui, sans-serif; }}
-  @media (max-width: 820px) {{ .grid {{ grid-template-columns: 1fr; }} }}
-</style></head>
-<body><div class="wrap">
-  <div class="hdr"><h1>{title_e}</h1><span class="ts">captured {html.escape(captured)}</span></div>
-  {note_block}
-  <div class="grid">
-    <div class="panel req"><div class="label">HTTP Request</div><pre>{req_e}</pre></div>
-    <div class="panel res"><div class="label">HTTP Response</div><pre>{res_e}</pre></div>
-  </div>
-  <div class="foot">claude-bughunter · evidence-card · secrets redacted before render</div>
+<html lang="en"><head><meta charset="utf-8"><style>
+  * {{ box-sizing:border-box; }}
+  body {{ margin:0; background:#d4d0c8; color:#101010;
+         font-family: Consolas,Menlo,"DejaVu Sans Mono",monospace; font-size:12.5px; }}
+  .cap {{ padding:6px 8px; font-family:Tahoma,"Segoe UI",sans-serif; font-size:11.5px; color:#333; }}
+  .cap-t {{ font-weight:600; }} .cap-n {{ color:#555; }}
+  .split {{ display:flex; gap:2px; }}
+  .pane {{ flex:1; background:#ffffff; border:1px solid #8a8a8a; min-width:0; }}
+  .pane .tab {{ background:#ece9d8; border-bottom:1px solid #8a8a8a; padding:3px 9px;
+               font-family:Tahoma,"Segoe UI",sans-serif; font-size:11.5px; color:#222; }}
+  .pane pre {{ margin:0; padding:8px 10px; white-space:pre-wrap; word-break:break-word;
+               line-height:1.45; color:#101010; }}
+  @media (max-width:820px) {{ .split {{ flex-direction:column; }} }}
+</style></head><body>
+{cap}<div class="split">
+  <div class="pane"><div class="tab">Request</div><pre>{req_e}</pre></div>
+  <div class="pane"><div class="tab">Response</div><pre>{res_e}</pre></div>
 </div></body></html>"""
 
 
@@ -127,8 +145,10 @@ def main(argv: list[str]) -> int:
     ap = argparse.ArgumentParser(description="Render an HTTP request/response into a redacted evidence card HTML.")
     ap.add_argument("--request", "-q", help="file with the raw HTTP request ('-' for stdin)")
     ap.add_argument("--response", "-s", help="file with the raw HTTP response ('-' for stdin)")
-    ap.add_argument("--title", "-T", default="HTTP evidence", help="card title")
-    ap.add_argument("--note", "-n", help="optional context line shown above the panels")
+    ap.add_argument("--title", "-T", default="", help="optional plain caption above the panes (default: none — keep captions in the report text)")
+    ap.add_argument("--note", "-n", help="optional context line shown above the panes")
+    ap.add_argument("--style", choices=["burp", "terminal"], default="burp",
+                    help="burp = neutral light Request|Response split (default); terminal = curl -i look")
     ap.add_argument("--out", "-o", required=True, help="output .html path (PNG will be the same stem)")
     ap.add_argument("--captured", help="capture timestamp text (default: now)")
     ap.add_argument("--no-redact", action="store_true", help="disable all redaction")
@@ -149,13 +169,14 @@ def main(argv: list[str]) -> int:
     captured = args.captured or datetime.datetime.now().isoformat(timespec="seconds")
     out = Path(args.out)
     out.parent.mkdir(parents=True, exist_ok=True)
-    out.write_text(build_html(args.title, request, response, captured, args.note), encoding="utf-8")
+    out.write_text(build_html(args.title, request, response, captured, args.note, args.style), encoding="utf-8")
     png = out.with_suffix(".png")
 
     print(f"[evidence-card] wrote {out}")
     print(f"[evidence-card] redaction: {'OFF' if args.no_redact else 'secrets' + (' + PII' if args.redact_pii else '')}")
-    print("[evidence-card] next — screenshot it via Playwright MCP:")
-    print(f"    browser_navigate(url=\"file://{out.resolve()}\")")
+    print("[evidence-card] next — Playwright MCP blocks file:, so serve on loopback then shoot:")
+    print(f"    python3 -m http.server 8731 --bind 127.0.0.1 --directory {out.parent}")
+    print(f"    browser_navigate(url=\"http://127.0.0.1:8731/{out.name}\")")
     print(f"    browser_take_screenshot(filename=\"{png}\", fullPage=True)")
     return 0
 

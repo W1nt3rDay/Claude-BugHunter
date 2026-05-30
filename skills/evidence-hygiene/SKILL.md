@@ -63,10 +63,14 @@ The session cookie value is the highest-value secret in any PoC. Mask:
   or Playwright's own network capture) rather than a GUI state. Burp MCP returns
   request/response **text, not images** — this turns that text into a real screenshot
   without capturing the Burp window.
-- `scripts/evidence-card.py` renders the pair into a styled HTML card and **redacts
-  secrets before render** (cookie values, `Set-Cookie`, `Authorization`, `Bearer`,
-  JWTs, api_key/token fields). Impact data (other-user UID/email, amounts) is kept —
-  add `--redact-pii` to also mask emails when you don't need to prove cross-account.
+- `scripts/evidence-card.py` renders the pair into a **plain, un-branded** artifact
+  and **redacts secrets before render** (cookie values, `Set-Cookie`, `Authorization`,
+  `Bearer`, JWTs, api_key/token fields). Impact data (other-user UID/email, amounts)
+  is kept — add `--redact-pii` to also mask emails when you don't need cross-account.
+  No logos, no footer, no caption baked in (keep captions in the report text). Two
+  neutral looks: `--style burp` (default; light Request|Response split) and
+  `--style terminal` (`curl -i` look). For a tight crop, size the Playwright viewport
+  to the content height before shooting instead of relying on `fullPage`.
 
   ```bash
   scripts/evidence-card.py --request req.txt --response resp.txt \
