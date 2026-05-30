@@ -12,6 +12,29 @@ YAML fast — but a template is only as good as its FP/FN rate, and that number 
 not exist until you test it. This skill is the discipline that makes AI-drafted
 templates trustworthy instead of noise.
 
+## Running nuclei when scanning is prohibited (zero target impact)
+
+Most programs ban automated scanners. You can still get nuclei's value **without
+sending one request to their infrastructure** — run the engine only against data you
+already captured or a target you self-host. Enforce that with the guard wrapper
+`scripts/nuclei-passive.py`, which **refuses to run nuclei unless every target is
+loopback (127.0.0.0/8 / localhost / ::1) or a local file** (strict IP parsing — no
+`127.0.0.1.evil.com` rebinding tricks):
+
+```bash
+# A) OFFLINE — scan artifacts you already saved while manually browsing (0 network)
+scripts/nuclei-passive.py -file -target ./loot/js/ -t exposures/ -t exposures/tokens/
+
+# B) LOCALHOST — self-host the target's OSS (or replay captured responses), scan that
+python3 -m http.server 9000 --bind 127.0.0.1 --directory ./loot/responses &
+scripts/nuclei-passive.py -u http://127.0.0.1:9000/ -t exposures/
+```
+
+Point it at `https://their-site/` and it exits 2 without running anything. The
+operator supplies data gathered during normal manual testing; the program's servers
+are never touched. This is the *only* nuclei usage that is unconditionally safe on a
+no-scanning program — see also the matching lab-validation step below.
+
 ## The one rule (read first)
 
 > **No template enters the private corpus until it has fired GREEN on a
@@ -157,16 +180,22 @@ test it. Never let memory-only confidence stand in for a real test.
 - Record provenance in the template `info.reference` (CVE/report/your-finding URL) and
   who validated it against which lab.
 - Wire it into recon as the **repositioned** nuclei — run the engine against YOUR
-  corpus instead of the full default set (this is the recommended replacement for the
-  default-template scan in `/recon` Step 5):
+  corpus instead of the full default set. **Which command depends on whether the
+  program permits scanning:**
 
   ```bash
-  # CVE-monitor / scope sweep with the validated private corpus
+  # DEFAULT (program bans scanners): passive only — captured artifacts or localhost.
+  scripts/nuclei-passive.py -file -target ./loot/ -t ~/.nuclei-forge/
+
+  # ONLY if scope.md EXPLICITLY permits automated scanning on the asset: live sweep
+  # with the validated private corpus, at the ≤5 req/s scope-derived cap.
   nuclei -l recon/$TARGET/live-hosts.txt -t ~/.nuclei-forge/ \
     -rl "$RL" -c "$CONC" -o recon/$TARGET/forge-hits.txt
   ```
 
-  (`$RL`/`$CONC` come from `/recon` Step 0 — same ≤5 req/s scope-derived cap.)
+  (`$RL`/`$CONC` come from `/recon` Step 0 — same ≤5 req/s scope-derived cap.) When
+  scope.md says "no automated scanning", use the passive form only and skip the live
+  sweep entirely.
 - **Cron it.** The corpus' value is over *time* — new assets and new CVEs aren't in
   "already scanned". A weekly sweep of your scope with the growing corpus is the
   monitoring play that mature-target one-shot scanning can't give you.
