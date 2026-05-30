@@ -69,7 +69,9 @@ The session cookie value is the highest-value secret in any PoC. Mask:
   is kept — add `--redact-pii` to also mask emails when you don't need cross-account.
   No logos, no footer, no caption baked in (keep captions in the report text). Two
   neutral looks: `--style burp` (default; light Request|Response split) and
-  `--style terminal` (`curl -i` look). For a tight crop, size the Playwright viewport
+  `--style terminal` (`curl -i` look). Redactions render as soft gray bars/pills (not
+  harsh black blocks), and JSON/HTML response bodies are auto-formatted (indented, not
+  one wrapped line). For a tight crop, size the Playwright viewport
   to the content height before shooting instead of relying on `fullPage`.
 
   ```bash

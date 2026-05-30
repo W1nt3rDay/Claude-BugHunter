@@ -35,43 +35,100 @@ from __future__ import annotations
 import argparse
 import datetime
 import html
+import json
 import re
 import sys
 from pathlib import Path
 
-MASK = "██████"  # ██████
+# Redaction is emitted as a sentinel (private-use chars) and turned into a soft
+# gray pill at render time — gentler than a hard black block, but still clearly a
+# redaction. Empty label → a plain bar; a label like "redacted" → a pill with text.
+_RD_O, _RD_C = "", ""
+
+
+def _rd(label: str = "") -> str:
+    return f"{_RD_O}{label}{_RD_C}"
 
 
 def _redact_secrets(text: str) -> str:
-    # Cookie: keep names, mask each value
+    # Cookie: keep names, mask each value (bar)
     def _cookie(m):
         head, val = m.group(1), m.group(2)
         parts = []
         for kv in val.split(";"):
             if "=" in kv:
                 name, _, _v = kv.partition("=")
-                parts.append(f"{name.strip()}={MASK}")
+                parts.append(f"{name.strip()}={_rd()}")
             else:
                 parts.append(kv.strip())
         return head + "; ".join(p for p in parts if p)
 
     text = re.sub(r"(?im)^(Cookie:\s*)(.+)$", _cookie, text)
-    # Set-Cookie: keep "name=", mask value up to first ; or EOL
-    text = re.sub(r"(?im)^(Set-Cookie:\s*[^=;\s]+=)([^;\r\n]+)", lambda m: m.group(1) + MASK, text)
+    # Set-Cookie: keep "name=", mask value up to first ; or EOL (bar)
+    text = re.sub(r"(?im)^(Set-Cookie:\s*[^=;\s]+=)([^;\r\n]+)", lambda m: m.group(1) + _rd(), text)
     # Authorization header value
-    text = re.sub(r"(?im)^(Authorization:\s*).+$", lambda m: m.group(1) + "[REDACTED]", text)
+    text = re.sub(r"(?im)^(Authorization:\s*).+$", lambda m: m.group(1) + _rd("redacted"), text)
     # Inline bearer tokens
-    text = re.sub(r"(?i)\bBearer\s+[A-Za-z0-9._\-]+", "Bearer [REDACTED]", text)
+    text = re.sub(r"(?i)\bBearer\s+[A-Za-z0-9._\-]+", "Bearer " + _rd("redacted"), text)
     # JWTs anywhere
-    text = re.sub(r"\beyJ[A-Za-z0-9._\-]{10,}", "[REDACTED-JWT]", text)
+    text = re.sub(r"\beyJ[A-Za-z0-9._\-]{10,}", _rd("redacted"), text)
     # api_key / token / secret = value  (json or form)
     text = re.sub(r'(?i)("?(?:api[_-]?key|token|secret|access[_-]?token|refresh[_-]?token)"?\s*[:=]\s*"?)([A-Za-z0-9._\-]{6,})',
-                  lambda m: m.group(1) + "[REDACTED]", text)
+                  lambda m: m.group(1) + _rd("redacted"), text)
     return text
 
 
 def _redact_pii(text: str) -> str:
-    return re.sub(r"\b[\w.+-]+@[\w-]+\.[\w.-]+\b", "[email-redacted]", text)
+    return re.sub(r"\b[\w.+-]+@[\w-]+\.[\w.-]+\b", _rd("redacted"), text)
+
+
+def _split_head_body(text: str):
+    """Split an HTTP message into (headers, separator, body) at the first blank line."""
+    for sep in ("\r\n\r\n", "\n\n"):
+        i = text.find(sep)
+        if i != -1:
+            return text[:i], sep, text[i + len(sep):]
+    return text, "", ""
+
+
+def _format_markup(s: str) -> str:
+    """Light HTML/XML indenter — break between adjacent tags and indent by depth."""
+    s = re.sub(r">\s*<", ">\n<", s.strip())
+    out, depth = [], 0
+    for line in s.split("\n"):
+        line = line.strip()
+        if not line:
+            continue
+        if line.startswith("</"):
+            depth = max(0, depth - 1)
+        out.append("  " * depth + line)
+        opens = bool(re.match(r"<[^/!?]", line))
+        closes = "</" in line or line.endswith("/>") or re.search(r"<[^>]*/>", line)
+        if opens and not closes:
+            depth += 1
+    return "\n".join(out)
+
+
+def _prettify_body(body: str) -> str:
+    """Pretty-print a JSON or HTML body so it isn't one long wrapped line."""
+    s = body.strip()
+    if not s:
+        return body
+    if s[0] in "{[":
+        try:
+            return json.dumps(json.loads(s), indent=2, ensure_ascii=False)
+        except Exception:
+            pass
+    if s[0] == "<":
+        return _format_markup(s)
+    return body
+
+
+def _prettify(text: str) -> str:
+    head, sep, body = _split_head_body(text)
+    if not sep:
+        return text
+    return head + sep + _prettify_body(body)
 
 
 def _caption(title: str, note: str | None) -> str:
@@ -86,10 +143,16 @@ def _caption(title: str, note: str | None) -> str:
     return f'<div class="cap">{"".join(bits)}</div>' if bits else ""
 
 
+def _spanify(escaped: str) -> str:
+    """Turn redaction sentinels into soft gray pills (empty label → a plain bar)."""
+    return re.sub(_RD_O + r"(.*?)" + _RD_C,
+                  lambda m: f'<span class="rd">{m.group(1)}</span>', escaped)
+
+
 def build_html(title: str, request: str, response: str, captured: str,
                note: str | None, style: str = "burp") -> str:
-    req_e = html.escape(request.rstrip())
-    res_e = html.escape(response.rstrip())
+    req_e = _spanify(html.escape(request.rstrip()))
+    res_e = _spanify(html.escape(response.rstrip()))
     cap = _caption(title, note)
 
     if style == "terminal":
@@ -103,6 +166,8 @@ def build_html(title: str, request: str, response: str, captured: str,
   .cap {{ padding:10px 16px 0; color:#8a8a8a; font-size:12px; }}
   .cap-t {{ color:#cfcfcf; }} .cap-n {{ color:#8a8a8a; }}
   .c {{ color:#8a8a8a; }}            /* comments / separators */
+  .rd {{ background:#3b3b3b; color:#9a9a9a; border-radius:2px; padding:0 5px; }}
+  .rd:empty {{ display:inline-block; min-width:46px; height:0.95em; vertical-align:-2px; padding:0; }}
 </style></head><body>
 {cap}<div class="term"><span class="c"># request</span>
 {req_e}
@@ -123,8 +188,10 @@ def build_html(title: str, request: str, response: str, captured: str,
   .pane {{ flex:1; background:#ffffff; border:1px solid #8a8a8a; min-width:0; }}
   .pane .tab {{ background:#ece9d8; border-bottom:1px solid #8a8a8a; padding:3px 9px;
                font-family:Tahoma,"Segoe UI",sans-serif; font-size:11.5px; color:#222; }}
-  .pane pre {{ margin:0; padding:8px 10px; white-space:pre-wrap; word-break:break-word;
+  .pane pre {{ margin:0; padding:8px 10px; white-space:pre-wrap; overflow-wrap:anywhere;
                line-height:1.45; color:#101010; }}
+  .rd {{ background:#c9c9c9; color:#5a5a5a; border-radius:2px; padding:0 5px; }}
+  .rd:empty {{ display:inline-block; min-width:46px; height:0.95em; vertical-align:-2px; padding:0; }}
   @media (max-width:820px) {{ .split {{ flex-direction:column; }} }}
 </style></head><body>
 {cap}<div class="split">
@@ -160,6 +227,10 @@ def main(argv: list[str]) -> int:
     if not request and not response:
         print("evidence-card: need --request and/or --response", file=sys.stderr)
         return 2
+
+    # Pretty-print JSON/HTML bodies BEFORE redaction so a token on its own line
+    # still matches, and the body isn't one long wrapped run.
+    request, response = _prettify(request), _prettify(response)
 
     if not args.no_redact:
         request, response = _redact_secrets(request), _redact_secrets(response)
