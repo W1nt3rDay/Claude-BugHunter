@@ -1,6 +1,6 @@
 ---
 name: recon
-description: Run full recon pipeline on a target — subdomain enum (Chaos API + subfinder), live host discovery (dnsx + httpx), URL crawl (katana + waybackurls + gau), gf pattern classification, nuclei scan. Outputs to recon/<target>/ directory. Usage: /recon target.com
+description: Run full recon pipeline on a target — subdomain enum (Chaos API + subfinder), live host discovery (dnsx + httpx), URL crawl (katana + waybackurls + gau), gf pattern classification, nuclei scan. All target-facing tools are hard-capped at 5 req/s (lower if scope.md declares a stricter cap). Outputs to recon/<target>/ directory. Usage: /recon target.com
 ---
 
 # /recon
@@ -26,10 +26,58 @@ Or with specific focus:
 ```
 /recon target.com --focus api
 /recon target.com --focus auth
-/recon target.com --fast     (skip historical URLs)
+/recon target.com --fast      (skip historical URLs)
+/recon target.com --rate 2    (force an even lower cap; values >5 are ignored)
 ```
 
+## Rate-limit policy (NON-NEGOTIABLE)
+
+Every **target-facing** tool (`httpx`, `katana`, `nuclei`) is rate-limited. The
+effective cap is the **lower** of:
+
+- a **hard ceiling of 5 req/s** — this is never exceeded, regardless of input, and
+- whatever rate cap is declared in `scope.md` (parsed dynamically — see Step 0).
+
+So if the program says "max 2 req/s", recon runs at 2. If the program says nothing
+(or says 50), recon runs at 5. There is no way to go above 5 from this command.
+
+> Passive tools (`subfinder`, `assetfinder`, `waybackurls`, `gau`, Chaos API) hit
+> third-party data sources, **not the target**, so the cap does not apply to them.
+
 ## Steps
+
+### Step 0: Resolve the rate cap from scope.md
+
+```bash
+TARGET="$1"
+HARD_MAX=5                       # absolute ceiling — recon NEVER exceeds this
+
+# --rate <n> override (can only LOWER the cap, never raise it above HARD_MAX)
+CLI_RATE=""
+for a in "$@"; do case "$prev" in --rate) CLI_RATE="$a";; esac; prev="$a"; done
+
+# Parse a declared cap out of scope.md free text, e.g.:
+#   "Max 2 requests/second", "rate limit: 3 req/s", "rate-limit: 4/sec"
+SCOPE_RL=""
+if [ -f scope.md ]; then
+  SCOPE_RL=$(grep -ioE '([0-9]+)[[:space:]]*(req|request)s?[[:space:]]*/?[[:space:]]*(s|sec|second)' scope.md | grep -oE '[0-9]+' | head -1)
+  [ -z "$SCOPE_RL" ] && SCOPE_RL=$(grep -iE 'rate[-_ ]?limit' scope.md | grep -oE '[0-9]+' | head -1)
+fi
+
+# Effective cap = min(everything provided), clamped to [1, HARD_MAX]
+RL=$HARD_MAX
+[ -n "$SCOPE_RL" ] && [ "$SCOPE_RL" -lt "$RL" ] && RL=$SCOPE_RL
+[ -n "$CLI_RATE" ]  && [ "$CLI_RATE"  -lt "$RL" ] && RL=$CLI_RATE
+[ "$RL" -gt "$HARD_MAX" ] && RL=$HARD_MAX     # belt-and-suspenders
+[ "$RL" -lt 1 ] && RL=1
+CONC=$RL                                       # keep concurrency <= rate so bursts can't exceed it
+export RL CONC
+
+echo "[+] Rate cap: ${RL} req/s  (hard ceiling ${HARD_MAX}; scope.md declared: ${SCOPE_RL:-none}; --rate: ${CLI_RATE:-none})"
+```
+
+> **Re-run Step 0 if you edit `scope.md` mid-engagement.** The cap is read once at the
+> top of the run; changing the program's stated limit means re-deriving `$RL`.
 
 ### Step 1: Subdomain Enumeration
 
@@ -53,9 +101,11 @@ echo "[+] Subdomains: $(wc -l < recon/$TARGET/subdomains.txt)"
 
 ```bash
 # DNS resolve + HTTP probe with tech detection
+: "${RL:=5}"; : "${CONC:=5}"     # fallback to hard cap if Step 0 ran in a separate shell
+# -rl caps target-facing probe rate; -t held to the same value so threads can't outrun the cap.
 cat recon/$TARGET/subdomains.txt \
   | dnsx -silent \
-  | httpx -silent -status-code -title -tech-detect \
+  | httpx -silent -status-code -title -tech-detect -rl "$RL" -t "$CONC" \
   | tee recon/$TARGET/live-hosts.txt
 
 echo "[+] Live hosts: $(wc -l < recon/$TARGET/live-hosts.txt)"
@@ -64,9 +114,10 @@ echo "[+] Live hosts: $(wc -l < recon/$TARGET/live-hosts.txt)"
 ### Step 3: URL Crawl
 
 ```bash
-# Active crawl
+# Active crawl — -rl/-c hold katana to the scope cap (it hits the live target)
+: "${RL:=5}"; : "${CONC:=5}"     # fallback to hard cap if Step 0 ran in a separate shell
 cat recon/$TARGET/live-hosts.txt | awk '{print $1}' \
-  | katana -d 3 -jc -kf all -silent \
+  | katana -d 3 -jc -kf all -silent -rl "$RL" -c "$CONC" \
   | anew recon/$TARGET/urls.txt
 
 # Historical URLs
@@ -99,12 +150,16 @@ echo "[+] API endpoints:   $(wc -l < recon/$TARGET/api-endpoints.txt)"
 ### Step 5: Nuclei Scan
 
 ```bash
+: "${RL:=5}"; : "${CONC:=5}"     # fallback to hard cap if Step 0 ran in a separate shell
+# -rl = global requests/sec cap, -c = template concurrency. Both pinned to the
+# scope-derived cap so nuclei cannot exceed 5 req/s (its default is 150).
 nuclei -l recon/$TARGET/live-hosts.txt \
   -t ~/nuclei-templates/ \
   -severity critical,high,medium \
+  -rl "$RL" -c "$CONC" \
   -o recon/$TARGET/nuclei.txt
 
-echo "[+] Nuclei findings: $(wc -l < recon/$TARGET/nuclei.txt)"
+echo "[+] Nuclei findings: $(wc -l < recon/$TARGET/nuclei.txt)  (rate-capped at ${RL} req/s)"
 ```
 
 ## Output
