@@ -58,6 +58,33 @@ The session cookie value is the highest-value secret in any PoC. Mask:
 **Method C — Find/replace in raw text** (for HAR files, terminal transcripts)
 - See §4 for the jq commands
 
+**Method D — Automated evidence card** (request/response → pre-redacted real PNG)
+- Best when your evidence is an HTTP request/response (from Burp MCP, Burp Repeater,
+  or Playwright's own network capture) rather than a GUI state. Burp MCP returns
+  request/response **text, not images** — this turns that text into a real screenshot
+  without capturing the Burp window.
+- `scripts/evidence-card.py` renders the pair into a styled HTML card and **redacts
+  secrets before render** (cookie values, `Set-Cookie`, `Authorization`, `Bearer`,
+  JWTs, api_key/token fields). Impact data (other-user UID/email, amounts) is kept —
+  add `--redact-pii` to also mask emails when you don't need to prove cross-account.
+
+  ```bash
+  scripts/evidence-card.py --request req.txt --response resp.txt \
+    --title "IDOR — uid 29 reads uid 71's invoice" \
+    --note "Authenticated as uid=29; object belongs to uid=71." \
+    --out evidence/01-idor-http.html
+  ```
+- Then screenshot it with the connected **Playwright MCP** into the finding's evidence
+  dir. Two gotchas verified in practice:
+  - Playwright MCP **blocks `file:` URLs** — serve the card on loopback first:
+    `python3 -m http.server <port> --bind 127.0.0.1 --directory evidence/` then
+    `browser_navigate("http://127.0.0.1:<port>/01-idor-http.html")`.
+  - `browser_take_screenshot(filename=..., fullPage=true)` resolves a **relative**
+    filename against Claude Code's cwd — run from the engagement folder and pass
+    `evidence/01-idor-http.png` so it lands beside the finding.
+- The visual exploit PoC (alert firing, the leaked-data page) is a **separate**
+  Playwright `browser_take_screenshot` of the live exploit — same redaction rules apply.
+
 ### 2.4 Pre-screenshot checklist
 
 Before clicking Capture:
