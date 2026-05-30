@@ -67,7 +67,26 @@ Runs the full hunt cycle without stopping for approval at each step:
 - **Reports are NEVER auto-submitted** — always requires explicit approval
 - **PUT/DELETE/PATCH** require human approval in --yolo mode (safe methods only)
 - **Circuit breaker** stops hammering if 5 consecutive 403/429/timeout on same host
-- **Rate limited** at 1 req/sec (testing) and 10 req/sec (recon)
+- **Rate limited** — hard ceiling **5 req/s**, never exceeded; lower when scope.md says so (see below)
+
+## Rate-limit policy (NON-NEGOTIABLE)
+
+Autopilot is autonomous, so its request rate is capped harder than an interactive
+session. Two phases, two caps — each clamped to the **min** of the values below and
+**never above 5 req/s**:
+
+| Phase | Cap | Source |
+|---|---|---|
+| **RECON** | `min(5, scope.md cap)` req/s | Delegates to `/recon`, which derives the cap in its Step 0 and pins `-rl` on httpx/katana/nuclei. Autopilot MUST run recon through `/recon` — it never re-implements scanning at a higher rate. |
+| **HUNT / testing** | `min(1, scope.md cap)` req/s | Active exploitation stays at **≤1 req/s** so probing a single endpoint can't burst. If scope.md declares a stricter cap, honor the stricter one. |
+
+Derive the scope cap the same way `/recon` Step 0 does — grep `scope.md` for a
+declared rate (e.g. "Max 2 requests/second", "rate-limit: 3 req/s") and clamp:
+`effective = min(5, scope_value)` for recon, `min(1, scope_value)` for testing.
+If scope.md forbids automated scanning outright, **skip the nuclei/recon-scan step
+entirely** — a rate cap does not make a banned scanner allowed.
+
+> Re-read `scope.md` whenever it changes mid-run; the cap is not cached across phases.
 
 ## Checkpoint Modes
 
