@@ -67,19 +67,19 @@ def _redact_secrets(text: str) -> str:
     # Set-Cookie: keep "name=", mask value up to first ; or EOL (bar)
     text = re.sub(r"(?im)^(Set-Cookie:\s*[^=;\s]+=)([^;\r\n]+)", lambda m: m.group(1) + _rd(), text)
     # Authorization header value
-    text = re.sub(r"(?im)^(Authorization:\s*).+$", lambda m: m.group(1) + _rd("redacted"), text)
+    text = re.sub(r"(?im)^(Authorization:\s*).+$", lambda m: m.group(1) + _rd(), text)
     # Inline bearer tokens
-    text = re.sub(r"(?i)\bBearer\s+[A-Za-z0-9._\-]+", "Bearer " + _rd("redacted"), text)
+    text = re.sub(r"(?i)\bBearer\s+[A-Za-z0-9._\-]+", "Bearer " + _rd(), text)
     # JWTs anywhere
-    text = re.sub(r"\beyJ[A-Za-z0-9._\-]{10,}", _rd("redacted"), text)
+    text = re.sub(r"\beyJ[A-Za-z0-9._\-]{10,}", _rd(), text)
     # api_key / token / secret = value  (json or form)
     text = re.sub(r'(?i)("?(?:api[_-]?key|token|secret|access[_-]?token|refresh[_-]?token)"?\s*[:=]\s*"?)([A-Za-z0-9._\-]{6,})',
-                  lambda m: m.group(1) + _rd("redacted"), text)
+                  lambda m: m.group(1) + _rd(), text)
     return text
 
 
 def _redact_pii(text: str) -> str:
-    return re.sub(r"\b[\w.+-]+@[\w-]+\.[\w.-]+\b", _rd("redacted"), text)
+    return re.sub(r"\b[\w.+-]+@[\w-]+\.[\w.-]+\b", _rd(), text)
 
 
 def _split_head_body(text: str):
@@ -245,10 +245,14 @@ def main(argv: list[str]) -> int:
 
     print(f"[evidence-card] wrote {out}")
     print(f"[evidence-card] redaction: {'OFF' if args.no_redact else 'secrets' + (' + PII' if args.redact_pii else '')}")
-    print("[evidence-card] next — Playwright MCP blocks file:, so serve on loopback then shoot:")
+    print("[evidence-card] next — Playwright MCP blocks file:, so serve on loopback then shoot.")
+    print("[evidence-card] tight crop (no empty area): resize to content height, no fullPage:")
     print(f"    python3 -m http.server 8731 --bind 127.0.0.1 --directory {out.parent}")
     print(f"    browser_navigate(url=\"http://127.0.0.1:8731/{out.name}\")")
-    print(f"    browser_take_screenshot(filename=\"{png}\", fullPage=True)")
+    print("    h = browser_evaluate(\"() => Math.ceil(Math.max(...[...document.body.children]"
+          ".map(e => e.getBoundingClientRect().bottom)) + 8)\")")
+    print("    browser_resize(width=1120, height=h)")
+    print(f"    browser_take_screenshot(filename=\"{png}\")   # NOT fullPage")
     return 0
 
 

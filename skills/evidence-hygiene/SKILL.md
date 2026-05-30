@@ -69,10 +69,9 @@ The session cookie value is the highest-value secret in any PoC. Mask:
   is kept — add `--redact-pii` to also mask emails when you don't need cross-account.
   No logos, no footer, no caption baked in (keep captions in the report text). Two
   neutral looks: `--style burp` (default; light Request|Response split) and
-  `--style terminal` (`curl -i` look). Redactions render as soft gray bars/pills (not
-  harsh black blocks), and JSON/HTML response bodies are auto-formatted (indented, not
-  one wrapped line). For a tight crop, size the Playwright viewport
-  to the content height before shooting instead of relying on `fullPage`.
+  `--style terminal` (`curl -i` look). Redactions render as plain gray bars (no text,
+  no harsh black blocks), and JSON/HTML response bodies are auto-formatted (indented,
+  not one wrapped line).
 
   ```bash
   scripts/evidence-card.py --request req.txt --response resp.txt \
@@ -81,13 +80,17 @@ The session cookie value is the highest-value secret in any PoC. Mask:
     --out evidence/01-idor-http.html
   ```
 - Then screenshot it with the connected **Playwright MCP** into the finding's evidence
-  dir. Two gotchas verified in practice:
-  - Playwright MCP **blocks `file:` URLs** — serve the card on loopback first:
-    `python3 -m http.server <port> --bind 127.0.0.1 --directory evidence/` then
-    `browser_navigate("http://127.0.0.1:<port>/01-idor-http.html")`.
-  - `browser_take_screenshot(filename=..., fullPage=true)` resolves a **relative**
-    filename against Claude Code's cwd — run from the engagement folder and pass
-    `evidence/01-idor-http.png` so it lands beside the finding.
+  dir. The verified capture sequence (tight crop, no empty area):
+  1. Playwright MCP **blocks `file:` URLs** — serve on loopback first:
+     `python3 -m http.server <port> --bind 127.0.0.1 --directory evidence/`
+  2. `browser_navigate("http://127.0.0.1:<port>/01-idor-http.html")`
+  3. measure content height, then size the viewport to it (avoids the blank area a
+     `fullPage` shot leaves under short content):
+     `h = browser_evaluate("() => Math.ceil(Math.max(...[...document.body.children].map(e => e.getBoundingClientRect().bottom)) + 8)")`
+     → `browser_resize(width=1120, height=h)`
+  4. `browser_take_screenshot(filename="evidence/01-idor-http.png")` — **not** `fullPage`.
+     A **relative** filename resolves against Claude Code's cwd, so run from the
+     engagement folder and it lands beside the finding.
 - The visual exploit PoC (alert firing, the leaked-data page) is a **separate**
   Playwright `browser_take_screenshot` of the live exploit — same redaction rules apply.
 
