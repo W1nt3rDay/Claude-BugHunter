@@ -35,6 +35,8 @@ import socket
 import subprocess
 import sys
 import textwrap
+import threading
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -150,6 +152,94 @@ def http_get(url: str, timeout: int = 5, headers: dict | None = None) -> tuple[i
 
 
 # ============================================================
+# Rate limiting — token bucket, scope.md-aware
+# ============================================================
+HARD_MAX_RPS = 5.0   # absolute ceiling for target-facing requests; never exceeded
+
+
+class TokenBucket:
+    """Thread-safe token-bucket rate limiter.
+
+    Capacity is fixed at 1 token (no burst) so requests are evenly paced at
+    `rate` per second — with the 10-worker probe pool sharing one bucket the
+    global target-facing rate stays strictly <= `rate`. acquire() blocks until
+    a token is available.
+    """
+
+    def __init__(self, rate: float):
+        self.rate = max(0.1, float(rate))
+        self.capacity = 1.0
+        self.tokens = 0.0   # no free cold-start token — strictly <= rate from t=0
+        self.timestamp = time.monotonic()
+        self.lock = threading.Lock()
+
+    def acquire(self) -> None:
+        while True:
+            with self.lock:
+                now = time.monotonic()
+                self.tokens = min(self.capacity, self.tokens + (now - self.timestamp) * self.rate)
+                self.timestamp = now
+                if self.tokens >= 1.0:
+                    self.tokens -= 1.0
+                    return
+                wait = (1.0 - self.tokens) / self.rate
+            time.sleep(wait)
+
+
+# Global limiter for target-facing requests. None = unlimited (passive/third-party
+# calls like crt.sh never set this; only cmd_recon installs it before probing).
+_RATE_LIMITER: TokenBucket | None = None
+
+
+def _declared_rate_from_scope(text: str) -> float | None:
+    """Parse a declared req/s cap out of scope.md free text. Mirrors /recon Step 0:
+    matches "Max 2 requests/second", "rate limit: 3 req/s", "rate-limit: 4/sec".
+    Returns the number, or None if nothing declared."""
+    m = re.search(r"(\d+(?:\.\d+)?)\s*(?:req|request)s?\s*/?\s*(?:s|sec|second)\b", text, re.I)
+    if m:
+        return float(m.group(1))
+    for line in text.splitlines():
+        if re.search(r"rate[-_ ]?limit", line, re.I):
+            mm = re.search(r"(\d+(?:\.\d+)?)", line)
+            if mm:
+                return float(mm.group(1))
+    return None
+
+
+def find_scope_md() -> Path | None:
+    """Look for scope.md in cwd and up to 4 parent dirs (the engagement folder)."""
+    here = Path.cwd()
+    for d in [here, *here.parents][:5]:
+        p = d / "scope.md"
+        if p.is_file():
+            return p
+    return None
+
+
+def resolve_rate_cap(cli_rate: float | None = None) -> tuple[float, dict]:
+    """Effective target-facing req/s = min(HARD_MAX_RPS, scope.md cap, --rate),
+    clamped to [0.1, HARD_MAX_RPS]. Returns (cap, meta) for banner printing."""
+    cap = HARD_MAX_RPS
+    scope = find_scope_md()
+    scope_val = None
+    if scope:
+        try:
+            scope_val = _declared_rate_from_scope(scope.read_text(errors="replace"))
+        except Exception:
+            scope_val = None
+    if scope_val is not None and scope_val < cap:
+        cap = scope_val
+    if cli_rate is not None and cli_rate < cap:
+        cap = cli_rate
+    if cap > HARD_MAX_RPS:
+        cap = HARD_MAX_RPS
+    if cap < 0.1:
+        cap = 0.1
+    return cap, {"scope_path": str(scope) if scope else None,
+                 "scope_val": scope_val, "cli": cli_rate}
+
+
+# ============================================================
 # recon — passive subdomain enum + DNS + HTTP probe
 # ============================================================
 def recon_subdomains_via_crtsh(target: str) -> set[str]:
@@ -194,6 +284,8 @@ def recon_http_probe(host: str) -> dict | None:
     a record with code/server/title or None if unreachable."""
     for scheme in ("https", "http"):
         url = f"{scheme}://{host}/"
+        if _RATE_LIMITER is not None:
+            _RATE_LIMITER.acquire()   # target-facing — pace to the scope cap
         code, headers, body = http_get(url, timeout=4)
         if code == 0:
             continue
@@ -265,9 +357,16 @@ def cmd_recon(args: argparse.Namespace) -> int:
     )
     say(f"  Resolved: {color(str(len(resolved)), 'bold')} / {len(subs)}")
 
-    # Step 3 — HTTP probe (concurrent via thread pool)
+    # Step 3 — HTTP probe (concurrent via thread pool, globally rate-capped)
     say()
     say(color("[3/4] HTTP probe", "cyan"))
+    global _RATE_LIMITER
+    cap, meta = resolve_rate_cap(getattr(args, "rate", None))
+    _RATE_LIMITER = TokenBucket(cap)
+    scope_note = (f"scope.md={meta['scope_val']}" if meta["scope_val"] is not None
+                  else ("scope.md: no cap declared" if meta["scope_path"] else "no scope.md"))
+    say(color(f"  Rate cap: {cap:g} req/s  (hard ceiling {HARD_MAX_RPS:g}; {scope_note}; "
+              f"--rate: {meta['cli'] if meta['cli'] is not None else 'none'})", "yellow"))
     from concurrent.futures import ThreadPoolExecutor, as_completed
     live = []
     with ThreadPoolExecutor(max_workers=10) as ex:
@@ -713,6 +812,9 @@ def main() -> int:
 
     p_recon = sub.add_parser("recon", help="passive recon + live-host probe + summary")
     p_recon.add_argument("target", help="root domain, e.g. hackerone.com")
+    p_recon.add_argument("--rate", type=float, default=None, metavar="N",
+                         help="cap target-facing probes at N req/s (only lowers; "
+                              f"hard ceiling {HARD_MAX_RPS:g}, also clamped by scope.md)")
     _add_proxy_args(p_recon)
     p_recon.set_defaults(func=cmd_recon)
 
